@@ -1,0 +1,20 @@
+[package]
+name = "rmtt"
+version = "0.1.0"
+edition = "2021"
+description = "RMTT client library (Remote Message Telemetry Transport)"
+license = "MIT"
+repository = "https://github.com/czqu/rmtt-rust"
+keywords = ["rmtt", "mqtt", "telemetry", "messaging", "protocol"]
+categories = ["network-programming"]
+
+[features]
+default = ["client", "tls"]
+client = []
+tls = ["dep:rustls", "dep:rustls-native-certs", "client"]
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+
+[dev-dependencies]
