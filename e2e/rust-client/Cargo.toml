@@ -1,0 +1,10 @@
+[package]
+name = "rmtt-rust-e2e"
+version = "0.1.0"
+edition = "2021"
+
+# Cross-language E2E: the rmtt Rust client from THIS repository against the
+# Java rmtt server (e2e/java-server). The path dependency points at the crate
+# under test, so CI exercises the local source instead of a published release.
+[dependencies]
+rmtt = { path = "../.." }

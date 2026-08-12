@@ -49,7 +49,10 @@ pub mod disconnect {
 /// A decoded inbound packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Packet {
-    Connack { return_code: u8, server_keepalive: u16 },
+    Connack {
+        return_code: u8,
+        server_keepalive: u16,
+    },
     Push(Vec<u8>),
     Pingreq,
     Pingresp,
@@ -124,7 +127,9 @@ pub fn decode(buf: &[u8]) -> std::result::Result<Option<(Packet, usize)>, Error>
     let msg_type = first >> 4;
     let flags = first & 0x0f;
     if flags != 0x00 {
-        return Err(Error::Protocol(format!("non-zero fixed header flags 0x{flags:02x}")));
+        return Err(Error::Protocol(format!(
+            "non-zero fixed header flags 0x{flags:02x}"
+        )));
     }
 
     // Decode variable-length remaining length (max 4 bytes as the server tolerates).
@@ -162,7 +167,10 @@ pub fn decode(buf: &[u8]) -> std::result::Result<Option<(Packet, usize)>, Error>
             }
             let return_code = body[0];
             let server_keepalive = u16::from_be_bytes([body[1], body[2]]);
-            Packet::Connack { return_code, server_keepalive }
+            Packet::Connack {
+                return_code,
+                server_keepalive,
+            }
         }
         mtype::PUSH => {
             if body.is_empty() {
@@ -178,7 +186,11 @@ pub fn decode(buf: &[u8]) -> std::result::Result<Option<(Packet, usize)>, Error>
             }
             Packet::Disconnect(body[0])
         }
-        other => return Err(Error::Protocol(format!("unsupported packet type 0x{other:02x}"))),
+        other => {
+            return Err(Error::Protocol(format!(
+                "unsupported packet type 0x{other:02x}"
+            )))
+        }
     };
 
     Ok(Some((packet, consumed)))
@@ -204,7 +216,9 @@ pub fn reconnect_policy(rc: u8) -> ReconnectPolicy {
     match rc {
         disconnect::NORMAL => ReconnectPolicy::DoNotReconnect,
         disconnect::CREDENTIAL_EXPIRED => ReconnectPolicy::RefreshCredential,
-        disconnect::SESSION_TAKEN_OVER | disconnect::KICKED_BY_ADMIN => ReconnectPolicy::DoNotReconnect,
+        disconnect::SESSION_TAKEN_OVER | disconnect::KICKED_BY_ADMIN => {
+            ReconnectPolicy::DoNotReconnect
+        }
         disconnect::SERVER_SHUTDOWN => ReconnectPolicy::Backoff,
         disconnect::PROTOCOL_VIOLATION => ReconnectPolicy::Backoff,
         disconnect::KEEPALIVE_TIMEOUT => ReconnectPolicy::Immediately,
@@ -239,7 +253,13 @@ mod tests {
         let buf = [0x20, 0x03, 0x00, 0x00, 0x1e];
         let (pkt, consumed) = decode(&buf).unwrap().unwrap();
         assert_eq!(consumed, 5);
-        assert_eq!(pkt, Packet::Connack { return_code: 0, server_keepalive: 30 });
+        assert_eq!(
+            pkt,
+            Packet::Connack {
+                return_code: 0,
+                server_keepalive: 30
+            }
+        );
     }
 
     #[test]
@@ -360,15 +380,42 @@ mod tests {
 
     #[test]
     fn reconnect_policy_mapping() {
-        assert_eq!(reconnect_policy(disconnect::NORMAL), ReconnectPolicy::DoNotReconnect);
-        assert_eq!(reconnect_policy(disconnect::CREDENTIAL_EXPIRED), ReconnectPolicy::RefreshCredential);
-        assert_eq!(reconnect_policy(disconnect::SESSION_TAKEN_OVER), ReconnectPolicy::DoNotReconnect);
-        assert_eq!(reconnect_policy(disconnect::KICKED_BY_ADMIN), ReconnectPolicy::DoNotReconnect);
-        assert_eq!(reconnect_policy(disconnect::SERVER_SHUTDOWN), ReconnectPolicy::Backoff);
-        assert_eq!(reconnect_policy(disconnect::PROTOCOL_VIOLATION), ReconnectPolicy::Backoff);
-        assert_eq!(reconnect_policy(disconnect::KEEPALIVE_TIMEOUT), ReconnectPolicy::Immediately);
-        assert_eq!(reconnect_policy(disconnect::RATE_LIMITED), ReconnectPolicy::LongBackoff);
-        assert_eq!(reconnect_policy(disconnect::CREDENTIAL_REJECTED), ReconnectPolicy::Backoff);
+        assert_eq!(
+            reconnect_policy(disconnect::NORMAL),
+            ReconnectPolicy::DoNotReconnect
+        );
+        assert_eq!(
+            reconnect_policy(disconnect::CREDENTIAL_EXPIRED),
+            ReconnectPolicy::RefreshCredential
+        );
+        assert_eq!(
+            reconnect_policy(disconnect::SESSION_TAKEN_OVER),
+            ReconnectPolicy::DoNotReconnect
+        );
+        assert_eq!(
+            reconnect_policy(disconnect::KICKED_BY_ADMIN),
+            ReconnectPolicy::DoNotReconnect
+        );
+        assert_eq!(
+            reconnect_policy(disconnect::SERVER_SHUTDOWN),
+            ReconnectPolicy::Backoff
+        );
+        assert_eq!(
+            reconnect_policy(disconnect::PROTOCOL_VIOLATION),
+            ReconnectPolicy::Backoff
+        );
+        assert_eq!(
+            reconnect_policy(disconnect::KEEPALIVE_TIMEOUT),
+            ReconnectPolicy::Immediately
+        );
+        assert_eq!(
+            reconnect_policy(disconnect::RATE_LIMITED),
+            ReconnectPolicy::LongBackoff
+        );
+        assert_eq!(
+            reconnect_policy(disconnect::CREDENTIAL_REJECTED),
+            ReconnectPolicy::Backoff
+        );
     }
 
     #[test]

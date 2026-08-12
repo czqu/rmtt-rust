@@ -1,2 +1,11 @@
 /target
 Cargo.lock
+!e2e/rust-client/Cargo.lock
+
+# e2e build artifacts
+e2e/bin/
+e2e/**/target/
+
+# local IDE / assistant state
+.idea/
+.workbuddy/

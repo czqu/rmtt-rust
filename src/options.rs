@@ -94,30 +94,48 @@ mod tests {
 
     #[test]
     fn explicit_response_timeout_wins() {
-        let o = ClientOptions { response_timeout: Duration::from_secs(7), ..Default::default() };
+        let o = ClientOptions {
+            response_timeout: Duration::from_secs(7),
+            ..Default::default()
+        };
         assert_eq!(o.effective_response_timeout(), Duration::from_secs(7));
     }
 
     #[test]
     fn response_timeout_derived_from_heartbeat() {
-        let o = ClientOptions { heartbeat_seconds: 4, ..Default::default() };
+        let o = ClientOptions {
+            heartbeat_seconds: 4,
+            ..Default::default()
+        };
         assert_eq!(o.effective_response_timeout(), Duration::from_secs(6));
     }
 
     #[test]
     fn response_timeout_floor_of_one_second() {
         // heartbeat 0 (unspecified) must not collapse the timeout to zero
-        let o = ClientOptions { heartbeat_seconds: 0, ..Default::default() };
+        let o = ClientOptions {
+            heartbeat_seconds: 0,
+            ..Default::default()
+        };
         assert_eq!(o.effective_response_timeout(), Duration::from_secs(1));
     }
 
     #[test]
     fn jitter_clamped_to_unit_range() {
-        let high = ClientOptions { reconnect_jitter: 1.5, ..Default::default() };
+        let high = ClientOptions {
+            reconnect_jitter: 1.5,
+            ..Default::default()
+        };
         assert_eq!(high.reconnect_jitter(), 1.0);
-        let low = ClientOptions { reconnect_jitter: -0.5, ..Default::default() };
+        let low = ClientOptions {
+            reconnect_jitter: -0.5,
+            ..Default::default()
+        };
         assert_eq!(low.reconnect_jitter(), 0.0);
-        let mid = ClientOptions { reconnect_jitter: 0.3, ..Default::default() };
+        let mid = ClientOptions {
+            reconnect_jitter: 0.3,
+            ..Default::default()
+        };
         assert_eq!(mid.reconnect_jitter(), 0.3);
     }
 }

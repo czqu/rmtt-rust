@@ -27,6 +27,9 @@ impl<T: Read + Write + Send> Io for T {}
 
 type BoxIo = Box<dyn Io>;
 
+/// A registered inbound-PUSH callback.
+type PayloadHandler = Box<dyn Fn(Message) + Send + Sync>;
+
 const ST_DISCONNECTED: u8 = 0;
 const ST_CONNECTED: u8 = 2;
 const ST_RECONNECTING: u8 = 3;
@@ -42,7 +45,7 @@ pub struct Client {
     state: Arc<AtomicU8>,
     stop: Arc<AtomicBool>,
     server_kp: u16,
-    handler: Arc<Mutex<Option<Box<dyn Fn(Message) + Send + Sync>>>>,
+    handler: Arc<Mutex<Option<PayloadHandler>>>,
 }
 
 impl Client {
@@ -105,8 +108,7 @@ fn spawn_io(addr: &str, opts: ClientOptions, stream: BoxIo, kp: u16) -> Result<C
     let (tx, rx) = mpsc::channel();
     let state = Arc::new(AtomicU8::new(ST_CONNECTED));
     let stop = Arc::new(AtomicBool::new(false));
-    let handler: Arc<Mutex<Option<Box<dyn Fn(Message) + Send + Sync>>>> =
-        Arc::new(Mutex::new(None));
+    let handler: Arc<Mutex<Option<PayloadHandler>>> = Arc::new(Mutex::new(None));
 
     let (tstate, tstop) = (state.clone(), stop.clone());
     let handler2 = handler.clone();
@@ -114,13 +116,25 @@ fn spawn_io(addr: &str, opts: ClientOptions, stream: BoxIo, kp: u16) -> Result<C
     let handle = std::thread::Builder::new()
         .name("rmtt-io".into())
         .spawn(move || io_loop(addr2, opts, stream, rx, tstate, tstop, handler2, kp))
-        .map_err(|e| Error::Io(std::io::Error::new(ErrorKind::Other, e)))?;
+        .map_err(|e| Error::Io(std::io::Error::other(e)))?;
 
-    Ok(Client { tx, _thread: Some(handle), state, stop, server_kp: kp, handler })
+    Ok(Client {
+        tx,
+        _thread: Some(handle),
+        state,
+        stop,
+        server_kp: kp,
+        handler,
+    })
 }
 
 /// Owns the connection for its whole lifetime: reads packets, drives the
 /// heartbeat, handles user commands and reconnects on loss.
+///
+/// A private per-connection thread entry point; the argument list is fixed by
+/// the state it needs to drive, so the lint is scoped here rather than
+/// packaging the state into an extra struct.
+#[allow(clippy::too_many_arguments)]
 fn io_loop(
     addr: String,
     opts: ClientOptions,
@@ -128,7 +142,7 @@ fn io_loop(
     rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
     stop: Arc<AtomicBool>,
-    handler: Arc<Mutex<Option<Box<dyn Fn(Message) + Send + Sync>>>>,
+    handler: Arc<Mutex<Option<PayloadHandler>>>,
     kp: u16,
 ) {
     let mut backoff = opts.reconnect_base;
@@ -198,12 +212,16 @@ fn connected_phase(
     opts: &ClientOptions,
     rx: &mpsc::Receiver<Command>,
     stop: &AtomicBool,
-    handler: &Mutex<Option<Box<dyn Fn(Message) + Send + Sync>>>,
+    handler: &Mutex<Option<PayloadHandler>>,
     server_kp: u16,
 ) -> PhaseEnd {
     // Heartbeat = server_keepalive when nonzero, otherwise the client
     // proposal. server_kp==0 disables PING and timeout judgements.
-    let hb = if server_kp > 0 { server_kp } else { opts.heartbeat_seconds };
+    let hb = if server_kp > 0 {
+        server_kp
+    } else {
+        opts.heartbeat_seconds
+    };
     let hb_disabled = hb == 0;
     let send_interval = Duration::from_secs(hb as u64);
     let response_timeout = Duration::from_secs_f64((hb as f64) * 1.5);
@@ -228,7 +246,10 @@ fn connected_phase(
                     last_sent = Instant::now();
                 }
                 Ok(Command::Shutdown) => {
-                    let _ = write_all_quiet(stream, &codec::encode_disconnect(codec::disconnect::NORMAL));
+                    let _ = write_all_quiet(
+                        stream,
+                        &codec::encode_disconnect(codec::disconnect::NORMAL),
+                    );
                     return PhaseEnd::Shutdown;
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -283,7 +304,10 @@ fn connected_phase(
                 Ok(None) => break,
                 Err(_) => {
                     // Protocol violation: answer with DISCONNECT(0x04).
-                    let _ = write_all_quiet(stream, &codec::encode_disconnect(codec::disconnect::PROTOCOL_VIOLATION));
+                    let _ = write_all_quiet(
+                        stream,
+                        &codec::encode_disconnect(codec::disconnect::PROTOCOL_VIOLATION),
+                    );
                     return PhaseEnd::Lost;
                 }
             }
@@ -338,9 +362,7 @@ fn split_hostport(addr: &str) -> Result<(String, u16)> {
 }
 
 fn resolve(host: &str, port: u16) -> Result<SocketAddr> {
-    let mut addrs = (host, port)
-        .to_socket_addrs()
-        .map_err(|e| Error::Io(e))?;
+    let mut addrs = (host, port).to_socket_addrs().map_err(Error::Io)?;
     addrs
         .next()
         .ok_or_else(|| Error::BadAddress(format!("cannot resolve {host}:{port}")))
@@ -372,9 +394,7 @@ fn dial_tcp(host: &str, port: u16, opts: &ClientOptions) -> Result<BoxIo> {
 fn dial_tls(host: &str, port: u16, opts: &ClientOptions) -> Result<BoxIo> {
     use std::time::SystemTime;
 
-    use rustls::client::danger::{
-        HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
-    };
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
     use rustls::SignatureScheme;
 
@@ -433,11 +453,7 @@ fn dial_tls(host: &str, port: u16, opts: &ClientOptions) -> Result<BoxIo> {
             .with_no_client_auth()
     } else {
         let mut roots = rustls::RootCertStore::empty();
-        for cert in rustls_native_certs::load_native_certs()
-            .certs
-            .into_iter()
-            .map(|c| c.into())
-        {
+        for cert in rustls_native_certs::load_native_certs().certs {
             let _ = roots.add(cert);
         }
         builder.with_root_certificates(roots).with_no_client_auth()
@@ -454,9 +470,7 @@ fn dial_tls(host: &str, port: u16, opts: &ClientOptions) -> Result<BoxIo> {
     let conn = rustls::ClientConnection::new(Arc::new(config), server_name)
         .map_err(|e| Error::Tls(e.to_string()))?;
     let mut stream = rustls::StreamOwned::new(conn, tcp);
-    stream
-        .flush()
-        .map_err(|e| Error::Io(e))?;
+    stream.flush().map_err(Error::Io)?;
     let _ = SystemTime::now(); // keep SystemTime import used when insecure path compiles out
     Ok(Box::new(stream))
 }
@@ -468,7 +482,11 @@ fn dial_tls(_host: &str, _port: u16, _opts: &ClientOptions) -> Result<BoxIo> {
 
 /// Write CONNECT, then read CONNACK (within the connect timeout).
 fn handshake(stream: &mut BoxIo, opts: &ClientOptions) -> Result<u16> {
-    let connect = codec::encode_connect(opts.protocol_version, opts.heartbeat_seconds, &opts.credential);
+    let connect = codec::encode_connect(
+        opts.protocol_version,
+        opts.heartbeat_seconds,
+        &opts.credential,
+    );
     stream.write_all(&connect)?;
 
     let deadline = Instant::now() + opts.connect_timeout;
@@ -477,7 +495,10 @@ fn handshake(stream: &mut BoxIo, opts: &ClientOptions) -> Result<u16> {
     loop {
         match codec::decode(&buf) {
             Ok(Some((packet, _))) => match packet {
-                codec::Packet::Connack { return_code, server_keepalive } => {
+                codec::Packet::Connack {
+                    return_code,
+                    server_keepalive,
+                } => {
                     if return_code != codec::returncode::ACCEPTED {
                         return Err(Error::ConnRefused(return_code));
                     }
@@ -500,7 +521,11 @@ fn handshake(stream: &mut BoxIo, opts: &ClientOptions) -> Result<u16> {
                         )))
                     }
                     Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                    Err(e) if e.kind() == ErrorKind::TimedOut || e.kind() == ErrorKind::WouldBlock => continue,
+                    Err(e)
+                        if e.kind() == ErrorKind::TimedOut || e.kind() == ErrorKind::WouldBlock =>
+                    {
+                        continue
+                    }
                     Err(e) => return Err(Error::Io(e)),
                 }
             }
@@ -523,8 +548,7 @@ fn backoff_next(cur: Duration, opts: &ClientOptions) -> Duration {
 }
 
 fn sleep_jittered(base: Duration, opts: &ClientOptions) {
-    let jitter = opts
-        .reconnect_jitter();
+    let jitter = opts.reconnect_jitter();
     let factor = 1.0 - jitter + rand_jitter() * (2.0 * jitter);
     std::thread::sleep(Duration::from_secs_f64(base.as_secs_f64() * factor));
 }
@@ -589,7 +613,10 @@ mod tests {
         assert_eq!(kp, 30);
         let w = written.lock().unwrap();
         assert_eq!(w[0], codec::mtype::CONNECT << 4);
-        assert_eq!(&w[1..], &[10u8, 0x63, 0x7a, 0x71, 0x75, 0x01, 0x00, 0x00, 0x0a, 0x00, 0x00]);
+        assert_eq!(
+            &w[1..],
+            &[10u8, 0x63, 0x7a, 0x71, 0x75, 0x01, 0x00, 0x00, 0x0a, 0x00, 0x00]
+        );
     }
 
     #[test]
@@ -604,24 +631,42 @@ mod tests {
     #[test]
     fn handshake_rejects_non_connack_first_packet() {
         let (mut s, _) = fake_server(vec![0x60, 0x00]);
-        assert!(matches!(handshake(&mut s, &ClientOptions::default()), Err(Error::Protocol(_))));
+        assert!(matches!(
+            handshake(&mut s, &ClientOptions::default()),
+            Err(Error::Protocol(_))
+        ));
     }
 
     #[test]
     fn split_hostport_ok() {
-        assert_eq!(split_hostport("127.0.0.1:18883").unwrap(), ("127.0.0.1".to_string(), 18883));
-        assert_eq!(split_hostport("/127.0.0.1:80").unwrap(), ("127.0.0.1".to_string(), 80));
-        assert_eq!(split_hostport("[::1]:8080").unwrap(), ("[::1]".to_string(), 8080));
+        assert_eq!(
+            split_hostport("127.0.0.1:18883").unwrap(),
+            ("127.0.0.1".to_string(), 18883)
+        );
+        assert_eq!(
+            split_hostport("/127.0.0.1:80").unwrap(),
+            ("127.0.0.1".to_string(), 80)
+        );
+        assert_eq!(
+            split_hostport("[::1]:8080").unwrap(),
+            ("[::1]".to_string(), 8080)
+        );
     }
 
     #[test]
     fn split_hostport_missing_port() {
-        assert!(matches!(split_hostport("127.0.0.1"), Err(Error::BadAddress(_))));
+        assert!(matches!(
+            split_hostport("127.0.0.1"),
+            Err(Error::BadAddress(_))
+        ));
     }
 
     #[test]
     fn split_hostport_bad_port() {
-        assert!(matches!(split_hostport("127.0.0.1:abc"), Err(Error::BadAddress(_))));
+        assert!(matches!(
+            split_hostport("127.0.0.1:abc"),
+            Err(Error::BadAddress(_))
+        ));
     }
 
     #[test]
@@ -635,11 +680,26 @@ mod tests {
     #[test]
     fn backoff_doubles_up_to_max() {
         let opts = ClientOptions::default();
-        assert_eq!(backoff_next(Duration::from_secs(1), &opts), Duration::from_secs(2));
-        assert_eq!(backoff_next(Duration::from_secs(300), &opts), Duration::from_secs(600));
-        assert_eq!(backoff_next(Duration::from_secs(400), &opts), Duration::from_secs(600));
-        let capped = ClientOptions { reconnect_max: Duration::from_secs(10), ..Default::default() };
-        assert_eq!(backoff_next(Duration::from_secs(6), &capped), Duration::from_secs(10));
+        assert_eq!(
+            backoff_next(Duration::from_secs(1), &opts),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            backoff_next(Duration::from_secs(300), &opts),
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            backoff_next(Duration::from_secs(400), &opts),
+            Duration::from_secs(600)
+        );
+        let capped = ClientOptions {
+            reconnect_max: Duration::from_secs(10),
+            ..Default::default()
+        };
+        assert_eq!(
+            backoff_next(Duration::from_secs(6), &capped),
+            Duration::from_secs(10)
+        );
     }
 
     #[test]

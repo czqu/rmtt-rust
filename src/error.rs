@@ -32,7 +32,9 @@ impl fmt::Display for Error {
             Error::Closed => write!(f, "connection is closed"),
             Error::NotConnected => write!(f, "not connected"),
             Error::BadAddress(s) => write!(f, "invalid address: {s}"),
-            Error::TlsUnavailable => write!(f, "tls support not compiled in (enable the `tls` feature)"),
+            Error::TlsUnavailable => {
+                write!(f, "tls support not compiled in (enable the `tls` feature)")
+            }
             Error::Tls(s) => write!(f, "tls error: {s}"),
         }
     }
@@ -59,11 +61,20 @@ mod tests {
             Error::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "x")).to_string(),
             "io error: x"
         );
-        assert_eq!(Error::Protocol("bad magic".into()).to_string(), "protocol violation: bad magic");
-        assert_eq!(Error::ConnRefused(0x03).to_string(), "connection refused (return code 0x03)");
+        assert_eq!(
+            Error::Protocol("bad magic".into()).to_string(),
+            "protocol violation: bad magic"
+        );
+        assert_eq!(
+            Error::ConnRefused(0x03).to_string(),
+            "connection refused (return code 0x03)"
+        );
         assert_eq!(Error::Closed.to_string(), "connection is closed");
         assert_eq!(Error::NotConnected.to_string(), "not connected");
-        assert_eq!(Error::BadAddress("nope".into()).to_string(), "invalid address: nope");
+        assert_eq!(
+            Error::BadAddress("nope".into()).to_string(),
+            "invalid address: nope"
+        );
         assert_eq!(
             Error::TlsUnavailable.to_string(),
             "tls support not compiled in (enable the `tls` feature)"
