@@ -12,6 +12,7 @@ categories = ["network-programming"]
 default = ["client", "tls"]
 client = []
 tls = ["dep:rustls", "dep:rustls-native-certs", "client"]
+server = []
 
 [dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
