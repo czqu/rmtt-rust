@@ -56,6 +56,33 @@
 //! - `default-features = false` → codec + error only.
 //! - `features = ["client"]` → codec + the blocking TCP client (`tls://` is a
 //!   `TlsUnavailable` error).
+//!
+//! ## Server (feature `server`)
+//!
+//! With the `server` feature you get the [`server::Server`] reactor: it
+//! authenticates CONNECT credentials, negotiates keepalive, enforces the
+//! heartbeat, takes over duplicate sessions and routes downstream pushes.
+//! The `server` feature is opt-in and pulls in no extra dependencies:
+//!
+//! ```toml
+//! [dependencies]
+//! rmtt = { version = "0.1", features = ["server"] }
+//! ```
+//!
+//! ```no_run
+//! # #[cfg(feature = "server")]
+//! # {
+//! use rmtt::server::{AuthResult, Server, ServerOptions};
+//!
+//! let server = Server::bind("0.0.0.0:18883", ServerOptions::default())?;
+//! server.set_authenticator(|credential| AuthResult::allow(credential));
+//! server.set_message_handler(|device_id, payload| {
+//!     println!("{device_id} sent {} bytes", payload.len());
+//! });
+//! server.push("dev-001", b"hello device")?;
+//! # }
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 pub mod codec;
 pub mod error;
@@ -66,6 +93,8 @@ pub mod client;
 pub mod message;
 #[cfg(feature = "client")]
 pub mod options;
+#[cfg(feature = "server")]
+pub mod server;
 
 pub use error::{Error, Result};
 
@@ -75,3 +104,5 @@ pub use client::Client;
 pub use message::Message;
 #[cfg(feature = "client")]
 pub use options::{ClientOptions, TlsConfig};
+#[cfg(feature = "server")]
+pub use server::{AuthResult, KeepalivePolicy, Server, ServerOptions};

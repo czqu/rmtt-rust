@@ -1,8 +1,8 @@
-# rmtt (Rust client)
+# rmtt (Rust)
 
-A minimal, dependency-light client library for the **RMTT** protocol (Remote
-Message Telemetry Transport), a point-to-point long-lived message push
-protocol.
+A minimal, dependency-light client and server library for the **RMTT**
+protocol (Remote Message Telemetry Transport), a point-to-point long-lived
+message push protocol.
 
 ## Transport support
 
@@ -18,6 +18,7 @@ protocol.
 | `default` (= `client` + `tls`) | full [`Client`] over TCP + TLS |
 | `default-features = false` | `codec` + `error` only — no TCP, no rustls |
 | `features = ["client"]` | `codec` + error + the blocking TCP client (`tls://` → `TlsUnavailable`) |
+| `features = ["server"]` | `codec` + error + the TCP `server` (opt-in, not in `default`) |
 
 Whether you link the network stack is a compile-time decision that has no
 effect on runtime performance of the parts you keep; with no default features
@@ -77,6 +78,55 @@ client.disconnect();                // clean DISCONNECT(0x00)
 library then drives PINGREQ/PINGRESP automatically at that cadence and tears
 down / reconnects when no packet is received for `1.5 × keepalive`.
 
+## Server usage
+
+The `server` feature (opt-in, no extra dependencies) provides a TCP server
+mirroring the reference `rmtt-java` / `rmtt-go` servers: CONNECT
+authentication, keepalive negotiation and enforcement, session takeover,
+downstream push and kick.
+
+```toml
+[dependencies]
+rmtt = { version = "0.1", features = ["server"] }
+```
+
+```rust
+use std::sync::Arc;
+
+use rmtt::server::{AuthResult, Server, ServerOptions};
+
+let server = Arc::new(Server::bind("0.0.0.0:18883", ServerOptions::default())?);
+
+// Map CONNECT credentials to device ids (default: credential == device id).
+server.set_authenticator(|credential| AuthResult::allow(credential));
+
+// Uplink PUSH dispatch; echo every payload back to the sender.
+let s = server.clone();
+server.set_message_handler(move |device_id, payload| {
+    let _ = s.push(device_id, payload);
+});
+
+server.set_on_connect(|device_id| println!("{device_id} online"));
+server.set_on_disconnect(|device_id, reason| println!("{device_id} left: {reason}"));
+
+assert!(server.is_online("dev-001"));
+server.push("dev-001", b"hello device")?;      // downstream PUSH
+server.kick("dev-001", 0x06)?;                  // DISCONNECT(0x06) + close
+server.shutdown();                              // DISCONNECT(0x03) to all
+```
+
+Server behaviour (aligned with the Java/Go references):
+
+- **Handshake** — bad magic closes silently, a bad protocol version answers
+  `CONNACK(0x01)`, a rejected credential answers `CONNACK(<return code>)`.
+- **Keepalive** — `KeepalivePolicy` clamps the client proposal (default
+  `[30, 600]`s, 60s fallback) and echoes it in CONNACK; a silent connection
+  is reaped with `DISCONNECT(0x05)` after `1.5 × server_keepalive`.
+- **Session takeover** — a second CONNECT for the same device id supersedes
+  the old connection, which receives `DISCONNECT(0x02)`.
+- **Protocol violations** — mid-stream garbage is answered with
+  `DISCONNECT(0x04)`.
+
 ## Options
 
 - `heartbeat_seconds` — keepalive proposal. `0` = "do not specify"; the server
@@ -96,5 +146,6 @@ payload. DISCONNECT carries a 1-byte return code (`codec::disconnect`).
 ## Testing
 
 ```
-cargo test
+cargo test                # codec + client tests (default features)
+cargo test --all-features # additionally runs the server interop tests
 ```

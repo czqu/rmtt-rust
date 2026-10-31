@@ -46,6 +46,21 @@ pub mod disconnect {
     pub const UNKNOWN: u8 = 0xfe;
 }
 
+/// A decoded CONNECT packet (as sent by a client to a server).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Connect {
+    /// Fixed magic number; must equal [`MAGIC_NUMBER`].
+    pub magic: u32,
+    /// Protocol version; must equal 1.
+    pub protocol_version: u8,
+    /// Reserved flags byte (currently always 0).
+    pub flags: u8,
+    /// Client keepalive proposal in seconds (0 = not specified).
+    pub keepalive: u16,
+    /// Opaque credential presented for authentication.
+    pub credential: String,
+}
+
 /// A decoded inbound packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Packet {
@@ -114,12 +129,25 @@ pub fn encode_disconnect(return_code: u8) -> Vec<u8> {
     out
 }
 
-/// Attempt to decode a single complete packet from the buffer.
+/// Build a CONNACK packet (return code + server keepalive).
+pub fn encode_connack(return_code: u8, server_keepalive: u16) -> Vec<u8> {
+    let mut out = encode_fixed_header(mtype::CONNACK, 3);
+    out.push(return_code);
+    out.extend_from_slice(&server_keepalive.to_be_bytes());
+    out
+}
+
+/// Build a PINGRESP packet (no body).
+pub fn encode_pingresp() -> Vec<u8> {
+    encode_fixed_header(mtype::PINGRESP, 0)
+}
+
+/// Parse the fixed header (type flags + variable-length remaining length).
 ///
-/// Returns `Ok(Some((packet, consumed)))` when a full frame is present,
-/// `Ok(None)` when more bytes are needed (read more into `buf` and retry),
-/// or `Err` on a wire/format violation.
-pub fn decode(buf: &[u8]) -> std::result::Result<Option<(Packet, usize)>, Error> {
+/// Returns `Ok(Some((msg_type, body_offset, body_len)))` when a complete
+/// frame is present in `buf`, `Ok(None)` when more bytes are needed, or
+/// `Err` on a wire/format violation.
+fn parse_fixed_header(buf: &[u8]) -> std::result::Result<Option<(u8, usize, usize)>, Error> {
     if buf.is_empty() {
         return Ok(None);
     }
@@ -157,8 +185,20 @@ pub fn decode(buf: &[u8]) -> std::result::Result<Option<(Packet, usize)>, Error>
     if buf.len() < idx + remaining {
         return Ok(None);
     }
-    let body = &buf[idx..idx + remaining];
-    let consumed = idx + remaining;
+    Ok(Some((msg_type, idx, remaining)))
+}
+
+/// Attempt to decode a single complete packet from the buffer.
+///
+/// Returns `Ok(Some((packet, consumed)))` when a full frame is present,
+/// `Ok(None)` when more bytes are needed (read more into `buf` and retry),
+/// or `Err` on a wire/format violation.
+pub fn decode(buf: &[u8]) -> std::result::Result<Option<(Packet, usize)>, Error> {
+    let Some((msg_type, body_off, body_len)) = parse_fixed_header(buf)? else {
+        return Ok(None);
+    };
+    let body = &buf[body_off..body_off + body_len];
+    let consumed = body_off + body_len;
 
     let packet = match msg_type {
         mtype::CONNACK => {
@@ -194,6 +234,53 @@ pub fn decode(buf: &[u8]) -> std::result::Result<Option<(Packet, usize)>, Error>
     };
 
     Ok(Some((packet, consumed)))
+}
+
+/// Attempt to decode a single CONNECT packet from the buffer (server side).
+///
+/// Mirrors [`decode`]: returns `Ok(Some((connect, consumed)))` when a full
+/// frame is present, `Ok(None)` when more bytes are needed, or `Err` on a
+/// wire/format violation (wrong packet type, malformed header, truncated
+/// body, non-UTF-8 credential). Magic number and protocol version are
+/// reported in the [`Connect`] fields for the caller to validate.
+pub fn decode_connect(buf: &[u8]) -> std::result::Result<Option<(Connect, usize)>, Error> {
+    let Some((msg_type, body_off, body_len)) = parse_fixed_header(buf)? else {
+        return Ok(None);
+    };
+    if msg_type != mtype::CONNECT {
+        return Err(Error::Protocol(format!(
+            "expected CONNECT, got packet type 0x{msg_type:02x}"
+        )));
+    }
+    let body = &buf[body_off..body_off + body_len];
+    if body.len() < CONNECT_CRED_OFF {
+        return Err(Error::Protocol("CONNECT body too short".into()));
+    }
+    let magic = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+    let protocol_version = body[CONNECT_VER_OFF];
+    let flags = body[CONNECT_FLAGS_OFF];
+    let keepalive = u16::from_be_bytes([body[CONNECT_KEEPALIVE_OFF], body[CONNECT_KEEPALIVE_OFF + 1]]);
+    let cred_len = u16::from_be_bytes([
+        body[CONNECT_CRED_LEN_OFF],
+        body[CONNECT_CRED_LEN_OFF + 1],
+    ]) as usize;
+    if body.len() < CONNECT_CRED_OFF + cred_len {
+        return Err(Error::Protocol("CONNECT credential truncated".into()));
+    }
+    let credential = std::str::from_utf8(&body[CONNECT_CRED_OFF..CONNECT_CRED_OFF + cred_len])
+        .map_err(|_| Error::Protocol("CONNECT credential is not valid UTF-8".into()))?
+        .to_string();
+
+    Ok(Some((
+        Connect {
+            magic,
+            protocol_version,
+            flags,
+            keepalive,
+            credential,
+        },
+        body_off + body_len,
+    )))
 }
 
 /// A reconnect decision derived from a server DISCONNECT return code.
@@ -421,5 +508,79 @@ mod tests {
     #[test]
     fn reconnect_policy_unknown_code_defaults_to_backoff() {
         assert_eq!(reconnect_policy(0x77), ReconnectPolicy::Backoff);
+    }
+
+    #[test]
+    fn connect_decode_roundtrip() {
+        let pkt = encode_connect(1, 30, "dev-001");
+        let (connect, consumed) = decode_connect(&pkt).unwrap().unwrap();
+        assert_eq!(consumed, pkt.len());
+        assert_eq!(
+            connect,
+            Connect {
+                magic: MAGIC_NUMBER,
+                protocol_version: 1,
+                flags: 0,
+                keepalive: 30,
+                credential: "dev-001".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn connect_decode_partial_returns_none() {
+        let pkt = encode_connect(1, 30, "dev-001");
+        assert_eq!(decode_connect(&pkt[..pkt.len() - 1]).unwrap(), None);
+        assert_eq!(decode_connect(&[]).unwrap(), None);
+    }
+
+    #[test]
+    fn decode_connect_rejects_other_packet_type() {
+        assert!(decode_connect(&encode_pingreq()).is_err());
+    }
+
+    #[test]
+    fn decode_connect_body_too_short_rejected() {
+        // CONNECT header claiming a 2-byte body
+        assert!(decode_connect(&[0x10, 0x02, 0x00, 0x00]).is_err());
+    }
+
+    #[test]
+    fn decode_connect_truncated_credential_rejected() {
+        let mut pkt = encode_connect(1, 30, "x");
+        // cred_len high byte: claims a 0xff00-byte credential instead of 1
+        pkt[CONNECT_CRED_LEN_OFF + 2] = 0xff;
+        assert!(decode_connect(&pkt).is_err());
+    }
+
+    #[test]
+    fn decode_connect_invalid_utf8_credential_rejected() {
+        let mut pkt = encode_connect(1, 30, "x");
+        let n = pkt.len();
+        pkt[n - 1] = 0xff;
+        assert!(decode_connect(&pkt).is_err());
+    }
+
+    #[test]
+    fn connack_encode_shape() {
+        assert_eq!(
+            encode_connack(returncode::ACCEPTED, 30),
+            vec![mtype::CONNACK << 4, 0x03, 0x00, 0x00, 0x1e]
+        );
+        let (pkt, _) = decode(&encode_connack(returncode::NOT_AUTHORISED, 0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pkt,
+            Packet::Connack {
+                return_code: returncode::NOT_AUTHORISED,
+                server_keepalive: 0
+            }
+        );
+    }
+
+    #[test]
+    fn encode_pingresp_shape() {
+        assert_eq!(encode_pingresp(), vec![mtype::PINGRESP << 4, 0x00]);
     }
 }
