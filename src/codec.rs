@@ -259,11 +259,10 @@ pub fn decode_connect(buf: &[u8]) -> std::result::Result<Option<(Connect, usize)
     let magic = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
     let protocol_version = body[CONNECT_VER_OFF];
     let flags = body[CONNECT_FLAGS_OFF];
-    let keepalive = u16::from_be_bytes([body[CONNECT_KEEPALIVE_OFF], body[CONNECT_KEEPALIVE_OFF + 1]]);
-    let cred_len = u16::from_be_bytes([
-        body[CONNECT_CRED_LEN_OFF],
-        body[CONNECT_CRED_LEN_OFF + 1],
-    ]) as usize;
+    let keepalive =
+        u16::from_be_bytes([body[CONNECT_KEEPALIVE_OFF], body[CONNECT_KEEPALIVE_OFF + 1]]);
+    let cred_len =
+        u16::from_be_bytes([body[CONNECT_CRED_LEN_OFF], body[CONNECT_CRED_LEN_OFF + 1]]) as usize;
     if body.len() < CONNECT_CRED_OFF + cred_len {
         return Err(Error::Protocol("CONNECT credential truncated".into()));
     }

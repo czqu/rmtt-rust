@@ -1,0 +1,11 @@
+[package]
+name = "rmtt-rust-e2e-server"
+version = "0.1.0"
+edition = "2021"
+
+# Cross-language E2E: the rmtt Rust server from THIS repository against the
+# Go / Rust rmtt clients (e2e/go-client, e2e/rust-client). The path dependency
+# points at the crate under test and enables only the `server` feature, which
+# also proves the server-only build stays self-contained (no client, no TLS).
+[dependencies]
+rmtt = { path = "../..", default-features = false, features = ["server"] }

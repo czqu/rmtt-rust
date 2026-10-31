@@ -464,8 +464,10 @@ fn connection_main(mut stream: TcpStream, shared: Arc<Shared>) {
     }
     // Bad protocol version -> CONNACK(0x01) then close.
     if connect.protocol_version != 1 {
-        let _ =
-            stream.write_all(&codec::encode_connack(codec::returncode::BAD_PROTOCOL_VERSION, 0));
+        let _ = stream.write_all(&codec::encode_connack(
+            codec::returncode::BAD_PROTOCOL_VERSION,
+            0,
+        ));
         return;
     }
 
@@ -479,8 +481,7 @@ fn connection_main(mut stream: TcpStream, shared: Arc<Shared>) {
     }
     let device_id = auth.device_id().to_string();
     if device_id.is_empty() {
-        let _ =
-            stream.write_all(&codec::encode_connack(codec::returncode::NOT_AUTHORISED, 0));
+        let _ = stream.write_all(&codec::encode_connack(codec::returncode::NOT_AUTHORISED, 0));
         return;
     }
 
@@ -500,7 +501,10 @@ fn connection_main(mut stream: TcpStream, shared: Arc<Shared>) {
     }
 
     if stream
-        .write_all(&codec::encode_connack(codec::returncode::ACCEPTED, server_kp))
+        .write_all(&codec::encode_connack(
+            codec::returncode::ACCEPTED,
+            server_kp,
+        ))
         .is_err()
     {
         handle.active.store(false, Ordering::SeqCst);
@@ -601,8 +605,9 @@ fn connected_loop(
 
         // Keepalive enforcement: any inbound packet refreshes the deadline.
         if kp_enabled && Instant::now().duration_since(last_received) >= response_timeout {
-            let _ =
-                stream.write_all(&codec::encode_disconnect(codec::disconnect::KEEPALIVE_TIMEOUT));
+            let _ = stream.write_all(&codec::encode_disconnect(
+                codec::disconnect::KEEPALIVE_TIMEOUT,
+            ));
             return "keepalive timeout".to_string();
         }
 
@@ -1032,10 +1037,7 @@ mod tests {
 
         let addr = server.local_addr().to_string();
         let client = Client::connect(&addr, client_opts("dev-7")).unwrap();
-        assert_eq!(
-            ev_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            "dev-7"
-        );
+        assert_eq!(ev_rx.recv_timeout(Duration::from_secs(5)).unwrap(), "dev-7");
         client.disconnect();
         server.shutdown();
     }

@@ -149,3 +149,7 @@ payload. DISCONNECT carries a 1-byte return code (`codec::disconnect`).
 cargo test                # codec + client tests (default features)
 cargo test --all-features # additionally runs the server interop tests
 ```
+
+The cross-language E2E matrix (java/rust servers x go/rust clients) lives in
+`e2e/` and runs in CI; reproduce a cell locally with
+`e2e/run_e2e.sh <java|rust> <go|rust>` after building the components.
