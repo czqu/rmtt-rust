@@ -1,6 +1,7 @@
 /target
 Cargo.lock
 !e2e/rust-client/Cargo.lock
+!e2e/rust-server/Cargo.lock
 
 # e2e build artifacts
 e2e/bin/
