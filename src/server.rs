@@ -1028,6 +1028,33 @@ mod tests {
     }
 
     #[test]
+    fn oversized_frame_header_gets_disconnect_0x04() {
+        // A fixed header declaring more than the max frame size must be
+        // answered with DISCONNECT(0x04) immediately, without waiting for a
+        // body that will never arrive.
+        let server = test_server(ServerOptions::default());
+        let mut stream = raw_connect(&server, 1, 30, "dev-1");
+        assert_eq!(
+            read_packet(&mut stream),
+            Some(codec::Packet::Connack {
+                return_code: codec::returncode::ACCEPTED,
+                server_keepalive: 30
+            })
+        );
+
+        // PUSH header claiming remaining length = 16 MiB + 1, body never sent.
+        let _ = stream.write_all(&[0x30, 0x81, 0x80, 0x80, 0x08]);
+
+        assert_eq!(
+            read_packet(&mut stream),
+            Some(codec::Packet::Disconnect(
+                codec::disconnect::PROTOCOL_VIOLATION
+            ))
+        );
+        server.shutdown();
+    }
+
+    #[test]
     fn on_connect_fires_with_device_id() {
         let server = test_server(ServerOptions::default());
         let (ev_tx, ev_rx) = mpsc::channel();

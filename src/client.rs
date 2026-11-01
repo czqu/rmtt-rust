@@ -35,13 +35,16 @@ const ST_CONNECTED: u8 = 2;
 const ST_RECONNECTING: u8 = 3;
 
 const READ_TIMEOUT: Duration = Duration::from_millis(100);
-const MAX_READ_BUFFER: usize = 16 * 1024 * 1024;
+/// Read-buffer cap: one maximum-size frame plus fixed-header slack. A frame
+/// larger than [`codec::MAX_FRAME_LEN`] is rejected at header parse time, so
+/// the buffer never needs to grow beyond this for well-formed traffic.
+const MAX_READ_BUFFER: usize = codec::MAX_FRAME_LEN + 64;
 
 /// An RMTT client. Created by [`Client::connect`]; a background IO thread
 /// drives reading, heartbeats and reconnects.
 pub struct Client {
     tx: mpsc::Sender<Command>,
-    _thread: Option<std::thread::JoinHandle<()>>,
+    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     state: Arc<AtomicU8>,
     stop: Arc<AtomicBool>,
     server_kp: u16,
@@ -91,16 +94,30 @@ impl Client {
     }
 
     /// Gracefully send DISCONNECT(0x00) and close the underlying connection.
+    ///
+    /// Blocks until the IO thread has written the DISCONNECT frame to the
+    /// transport and terminated, so a short-lived process may exit (or drop
+    /// the client) immediately afterwards without losing the frame. Idempotent.
+    ///
+    /// Must not be called from the payload handler, which runs on the IO
+    /// thread itself; the shutdown is then only requested, not awaited.
     pub fn disconnect(&self) {
         let _ = self.tx.send(Command::Shutdown);
         self.stop.store(true, Ordering::SeqCst);
+        let handle = self.thread.lock().unwrap().take();
+        if let Some(handle) = handle {
+            // Guard against a call from the payload handler (the IO thread):
+            // joining ourselves would deadlock.
+            if handle.thread().id() != std::thread::current().id() {
+                let _ = handle.join();
+            }
+        }
     }
 }
 
 impl Drop for Client {
     fn drop(&mut self) {
-        let _ = self.tx.send(Command::Shutdown);
-        self.stop.store(true, Ordering::SeqCst);
+        self.disconnect();
     }
 }
 
@@ -120,7 +137,7 @@ fn spawn_io(addr: &str, opts: ClientOptions, stream: BoxIo, kp: u16) -> Result<C
 
     Ok(Client {
         tx,
-        _thread: Some(handle),
+        thread: Mutex::new(Some(handle)),
         state,
         stop,
         server_kp: kp,
@@ -151,6 +168,11 @@ fn io_loop(
 
     loop {
         if !first {
+            // A shutdown requested during backoff must not dial again.
+            if stop.load(Ordering::SeqCst) {
+                state.store(ST_DISCONNECTED, Ordering::SeqCst);
+                break;
+            }
             // (re)connect attempt after a loss.
             match dial(&addr, &opts) {
                 Ok(mut s) => match handshake_safe(&mut s, &opts) {
@@ -164,7 +186,7 @@ fn io_loop(
                             break;
                         }
                         backoff = backoff_next(backoff, &opts);
-                        sleep_jittered(backoff, &opts);
+                        sleep_jittered(backoff, &opts, &stop);
                         continue;
                     }
                 },
@@ -174,7 +196,7 @@ fn io_loop(
                         break;
                     }
                     backoff = backoff_next(backoff, &opts);
-                    sleep_jittered(backoff, &opts);
+                    sleep_jittered(backoff, &opts, &stop);
                     continue;
                 }
             }
@@ -194,7 +216,7 @@ fn io_loop(
                 }
                 state.store(ST_RECONNECTING, Ordering::SeqCst);
                 backoff = backoff_next(backoff, &opts);
-                sleep_jittered(backoff, &opts);
+                sleep_jittered(backoff, &opts, &stop);
             }
         }
     }
@@ -547,10 +569,21 @@ fn backoff_next(cur: Duration, opts: &ClientOptions) -> Duration {
     }
 }
 
-fn sleep_jittered(base: Duration, opts: &ClientOptions) {
+fn sleep_jittered(base: Duration, opts: &ClientOptions, stop: &AtomicBool) {
     let jitter = opts.reconnect_jitter();
     let factor = 1.0 - jitter + rand_jitter() * (2.0 * jitter);
-    std::thread::sleep(Duration::from_secs_f64(base.as_secs_f64() * factor));
+    let mut remaining = Duration::from_secs_f64(base.as_secs_f64() * factor);
+    // Sleep in short slices so a shutdown request cuts the backoff wait short
+    // and `disconnect()` never blocks for the full interval.
+    let slice = Duration::from_millis(50);
+    while remaining > Duration::ZERO {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let step = remaining.min(slice);
+        std::thread::sleep(step);
+        remaining = remaining.saturating_sub(step);
+    }
 }
 
 fn rand_jitter() -> f64 {
@@ -700,6 +733,62 @@ mod tests {
             backoff_next(Duration::from_secs(6), &capped),
             Duration::from_secs(10)
         );
+    }
+
+    /// A stream that behaves like a live idle connection: reads report
+    /// `WouldBlock` (nothing received yet) and writes are recorded, optionally
+    /// after a delay that simulates a slow socket write.
+    struct IdleStream {
+        written: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        write_delay: Duration,
+    }
+
+    impl Read for IdleStream {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            std::thread::sleep(Duration::from_millis(5));
+            Err(std::io::Error::new(ErrorKind::WouldBlock, "idle"))
+        }
+    }
+
+    impl Write for IdleStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            std::thread::sleep(self.write_delay);
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn disconnect_waits_until_disconnect_frame_written() {
+        // The write takes 300ms; disconnect() must not return before the
+        // DISCONNECT frame has actually been handed to the transport,
+        // otherwise a short-lived process that exits right after loses it.
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stream = IdleStream {
+            written: written.clone(),
+            write_delay: Duration::from_millis(300),
+        };
+        let opts = ClientOptions {
+            auto_reconnect: false,
+            ..Default::default()
+        };
+        let client = spawn_io("tcp://127.0.0.1:1", opts, Box::new(stream), 30).unwrap();
+
+        let start = Instant::now();
+        client.disconnect();
+
+        assert!(
+            start.elapsed() >= Duration::from_millis(300),
+            "disconnect() returned before the DISCONNECT write completed"
+        );
+        assert_eq!(
+            *written.lock().unwrap(),
+            codec::encode_disconnect(codec::disconnect::NORMAL)
+        );
+        assert!(!client.is_connected());
     }
 
     #[test]

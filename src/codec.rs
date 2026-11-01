@@ -15,6 +15,11 @@ pub mod mtype {
 /// Fixed magic number "czqu".
 pub const MAGIC_NUMBER: u32 = 0x637A_7175;
 
+/// Maximum accepted frame body (`remaining length`) in bytes: 16 MiB. A fixed
+/// header that declares more is a protocol violation and is rejected as soon
+/// as the header has been parsed, before any body byte is read or buffered.
+pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+
 pub const CONNECT_MAGIC_OFF: usize = 0;
 pub const CONNECT_VER_OFF: usize = 4;
 pub const CONNECT_FLAGS_OFF: usize = 5;
@@ -180,6 +185,14 @@ fn parse_fixed_header(buf: &[u8]) -> std::result::Result<Option<(u8, usize, usiz
         if nl > 4 {
             return Err(Error::Protocol("malformed remaining length".into()));
         }
+    }
+
+    // Reject oversized frames the moment the header is complete: a peer must
+    // never make us wait for (or buffer) a body larger than MAX_FRAME_LEN.
+    if remaining > MAX_FRAME_LEN {
+        return Err(Error::Protocol(format!(
+            "frame too large: {remaining} bytes (max {MAX_FRAME_LEN})"
+        )));
     }
 
     if buf.len() < idx + remaining {
@@ -426,6 +439,25 @@ mod tests {
         // five continuation digits -> malformed remaining length
         let buf = [0x30, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00];
         assert!(decode(&buf).is_err());
+    }
+
+    #[test]
+    fn oversized_remaining_length_rejected_before_body() {
+        // PUSH fixed header declaring remaining length = MAX_FRAME_LEN + 1
+        // (16 MiB + 1 = 16777217 -> varint 0x81 0x80 0x80 0x08) and no body at
+        // all: the header alone must be rejected without buffering a body.
+        let hdr = [mtype::PUSH << 4, 0x81, 0x80, 0x80, 0x08];
+        assert!(decode(&hdr).is_err());
+        let hdr = [mtype::CONNECT << 4, 0x81, 0x80, 0x80, 0x08];
+        assert!(decode_connect(&hdr).is_err());
+    }
+
+    #[test]
+    fn max_frame_len_remaining_length_is_accepted() {
+        // remaining length == MAX_FRAME_LEN (16 MiB -> varint 0x80 0x80 0x80 0x08)
+        // is legal: only the body is still pending.
+        let hdr = [mtype::PUSH << 4, 0x80, 0x80, 0x80, 0x08];
+        assert_eq!(decode(&hdr).unwrap(), None);
     }
 
     #[test]

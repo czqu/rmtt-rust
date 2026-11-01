@@ -71,7 +71,7 @@ client.set_payload_handler(|msg| {
 });
 
 client.push(b"hello device")?;      // send a PUSH
-client.disconnect();                // clean DISCONNECT(0x00)
+client.disconnect();                // clean DISCONNECT(0x00), blocks until written
 ```
 
 `server_keepalive()` reports the server-negotiated value from CONNACK; the
@@ -142,6 +142,10 @@ Server behaviour (aligned with the Java/Go references):
 On CONNECT the protocol magic (`0x637A7175 "czqu"`), version and credential are
 validated by the server. PUSH bodies carry the `Reserved` byte then the opaque
 payload. DISCONNECT carries a 1-byte return code (`codec::disconnect`).
+
+A frame body larger than 16 MiB (`codec::MAX_FRAME_LEN`) is a protocol
+violation: it is rejected as soon as the fixed header is parsed — before any
+body byte is buffered — with `DISCONNECT(0x04)`.
 
 ## Testing
 
